@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Google Photos: Ultimate Helper (Preload, Delete, & Auto-Scroll)
+// @name         Google Photos Tools (Delete & Preload)
 // @namespace    zhogov.google_photos_tools
 // @version      1.0
 // @description  Press keyboard key to delete and different precaching strategies
