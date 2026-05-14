@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Google Photos: Ultimate Helper (Preload, Delete, & Auto-Scroll)
-// @namespace    aleksei.gemini.gp_helper
-// @version      2.0
+// @namespace    zhogov.google_photos_tools
+// @version      1.0
 // @description  Combines instant browsing (preloading), "End" key to delete, and a floating UI for auto-navigation.
-// @author       Aleksei & Gemini
+// @author       Aleksei Zhogov
 // @match        https://photos.google.com/*
 // @grant        none
 // ==/UserScript==
