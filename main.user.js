@@ -2,7 +2,7 @@
 // @name         Google Photos: Ultimate Helper (Preload, Delete, & Auto-Scroll)
 // @namespace    zhogov.google_photos_tools
 // @version      1.0
-// @description  Combines instant browsing (preloading), "End" key to delete, and a floating UI for auto-navigation.
+// @description  Press keyboard key to delete and different precaching strategies
 // @author       Aleksei Zhogov
 // @match        https://photos.google.com/*
 // @grant        none
@@ -11,42 +11,47 @@
 (function() {
     'use strict';
 
-    // --- CONFIGURATION (Preloader) ---
-    const NEIGHBORS_TO_PRELOAD = 6;
-    const MAX_CONCURRENT_FETCHES = 4;
-    const ENABLE_GRID_WARMER_DEFAULT = false;
-    const GRID_WARMER_SCROLL_STEPS = 120;
-    const GRID_WARMER_DELAY_MS = 120;
+    // --- MUTABLE CONFIGURATION (Synced with UI) ---
+    let cfg = {
+        neighbors: 6,
+        parallel: 4,
+        warmerEnabled: false,
+        warmerSteps: 120,
+        warmerDelay: 120,
+        autoCount: 200,
+        autoDelay: 500
+    };
 
-    let enableGridWarmer = ENABLE_GRID_WARMER_DEFAULT;
     let inflight = 0;
     const queue = [];
     const warmed = new Set();
 
-    // --- STYLING (UI & Toasts) ---
+    // --- STYLING ---
     const style = document.createElement('style');
     style.innerHTML = `
         #gp-helper-ui {
             position: fixed; bottom: 20px; right: 20px;
-            background: #202124; color: white; padding: 10px;
+            background: #202124; color: white; padding: 12px;
             border-radius: 8px; z-index: 999999;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-            font-family: Roboto, Arial, sans-serif; font-size: 13px;
-            display: flex; flex-direction: column; gap: 8px;
-            border: 1px solid #5f6368;
+            font-family: Roboto, Arial, sans-serif; font-size: 12px;
+            display: flex; flex-direction: column; gap: 6px;
+            border: 1px solid #5f6368; width: 220px;
         }
-        .gp-row { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+        .gp-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+        .gp-section-title { font-weight: bold; color: #4285f4; margin-top: 5px; border-bottom: 1px solid #3c4043; padding-bottom: 2px; display: flex; align-items: center; gap: 4px; }
+        .gp-info { cursor: help; color: #8ab4f8; font-weight: normal; font-size: 13px; margin-left: 2px; }
         .gp-btn {
             background: #4285f4; color: white; border: none;
             padding: 5px 12px; border-radius: 4px; cursor: pointer;
-            font-weight: bold; min-width: 80px;
+            font-weight: bold; flex-grow: 1;
         }
         .gp-btn:hover { background: #357abd; }
         .gp-btn.stop { background: #ea4335; }
-        .gp-btn.secondary { background: #5f6368; min-width: auto; }
+        .gp-btn.secondary { background: #5f6368; flex-grow: 0; min-width: 30px; }
         .gp-input {
-            width: 60px; background: #3c4043; color: white;
-            border: 1px solid #5f6368; border-radius: 4px; padding: 2px 5px;
+            width: 50px; background: #3c4043; color: white;
+            border: 1px solid #5f6368; border-radius: 4px; padding: 2px 4px; font-size: 11px;
         }
         #gp-docs {
             margin-top: 5px; padding-top: 5px; border-top: 1px solid #5f6368;
@@ -56,29 +61,25 @@
         .gp-toast {
             position: fixed; left: 50%; top: 70px; transform: translateX(-50%);
             background: rgba(0,0,0,.85); color: #fff; padding: 8px 12px;
-            border-radius: 10px; fontSize: 13px; z-index: 999999;
-            box-shadow: 0 6px 24px rgba(0,0,0,.3); pointer-events: none;
+            border-radius: 10px; font-size: 13px; z-index: 999999; pointer-events: none;
         }
     `;
     document.head.appendChild(style);
 
     // --- UTILITIES ---
-    function log(...a) { console.debug("[GP-Ultimate]", ...a); }
-
-    function toast(msg) {
+    const toast = (msg) => {
         const el = document.createElement('div');
         el.className = 'gp-toast';
         el.textContent = msg;
         document.body.appendChild(el);
         setTimeout(() => el.remove(), 1600);
-    }
+    };
 
-    function isVisible(el) {
+    const isVisible = (el) => {
         const r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0 && window.getComputedStyle(el).visibility !== 'hidden';
-    }
+    };
 
-    // --- PRELOADER LOGIC ---
     function largestFromSrcset(imgEl) {
         const set = imgEl?.getAttribute('srcset');
         if (!set) return imgEl?.currentSrc || imgEl?.src || null;
@@ -99,216 +100,181 @@
     }
 
     function pump() {
-        while (inflight < MAX_CONCURRENT_FETCHES && queue.length) {
+        while (inflight < cfg.parallel && queue.length) {
             const url = queue.shift();
             inflight++;
             const img = new Image();
             img.decoding = 'async';
             img.loading = 'eager';
-            img.referrerPolicy = 'strict-origin-when-cross-origin';
             img.onload = img.onerror = () => { inflight--; pump(); };
             img.src = url;
         }
     }
 
-    function findViewerImage() {
+    // --- CORE LOGIC ---
+    function preloadViewerAndNeighbors() {
         const imgs = Array.from(document.querySelectorAll('img'));
-        let best = null, bestArea = 0;
+        let main = null, bestArea = 0;
         for (const im of imgs) {
             const rect = im.getBoundingClientRect();
             const area = rect.width * rect.height;
-            if (area > bestArea && rect.width > 400 && rect.height > 300 && isVisible(im)) {
-                best = im; bestArea = area;
+            if (area > bestArea && rect.width > 400 && isVisible(im)) { main = im; bestArea = area; }
+        }
+
+        if (main) warm(largestFromSrcset(main));
+
+        const thumbs = (function() {
+            const candidates = Array.from(document.querySelectorAll('div,section,ul')).filter(isVisible);
+            let best = null, bestCount = 0;
+            for (const c of candidates) {
+                const imgs = c.querySelectorAll('img');
+                if (imgs.length > bestCount && imgs.length >= 5) { best = c; bestCount = imgs.length; }
             }
-        }
-        return best;
-    }
+            return best ? Array.from(best.querySelectorAll('img')) : [];
+        })();
 
-    function findFilmstripThumbnails() {
-        const candidates = Array.from(document.querySelectorAll('div,section,ul')).filter(isVisible);
-        let best = null, bestCount = 0;
-        for (const c of candidates) {
-            const imgs = c.querySelectorAll('img');
-            if (imgs.length > bestCount && imgs.length >= 5) { best = c; bestCount = imgs.length; }
-        }
-        return best ? Array.from(best.querySelectorAll('img')) : [];
-    }
-
-    function preloadViewerAndNeighbors() {
-        const main = findViewerImage();
-        if (main) {
-            const big = largestFromSrcset(main);
-            warm(big);
-            log("Warmed current:", big);
-        }
-        const thumbs = findFilmstripThumbnails();
         if (thumbs.length) {
             const mainSrc = main ? (main.currentSrc || largestFromSrcset(main)) : null;
-            let idx = -1;
-            for (let i = 0; i < thumbs.length; i++) {
-                const u = largestFromSrcset(thumbs[i]);
-                if (mainSrc && u && mainSrc.split('=')[0] === u.split('=')[0]) { idx = i; break; }
-            }
+            let idx = thumbs.findIndex(t => mainSrc && largestFromSrcset(t)?.split('=')[0] === mainSrc.split('=')[0]);
             if (idx === -1) idx = Math.floor(thumbs.length / 2);
-            for (let delta = 1; delta <= NEIGHBORS_TO_PRELOAD; delta++) {
-                const left = thumbs[idx - delta], right = thumbs[idx + delta];
-                if (left) warm(largestFromSrcset(left));
-                if (right) warm(largestFromSrcset(right));
+            for (let d = 1; d <= cfg.neighbors; d++) {
+                if (thumbs[idx - d]) warm(largestFromSrcset(thumbs[idx - d]));
+                if (thumbs[idx + d]) warm(largestFromSrcset(thumbs[idx + d]));
             }
         }
     }
 
-    // --- GRID WARMER (Passive Caching) ---
     async function gridWarmer() {
-        if (!enableGridWarmer) return;
+        if (!cfg.warmerEnabled || /\/photo\//.test(location.pathname)) return;
         const sc = document.scrollingElement || document.documentElement;
         const startY = sc.scrollTop;
         const step = Math.max(200, window.innerHeight * 0.8);
-        for (let i = 0; i < GRID_WARMER_SCROLL_STEPS; i++) {
+        
+        toast("Starting Grid Warm-up...");
+        for (let i = 0; i < cfg.warmerSteps && cfg.warmerEnabled; i++) {
             sc.scrollTop += step;
-            await new Promise(r => setTimeout(r, GRID_WARMER_DELAY_MS));
+            await new Promise(r => setTimeout(r, cfg.warmerDelay));
             document.querySelectorAll('img').forEach(img => {
                 const r = img.getBoundingClientRect();
-                if (r.top < innerHeight * 1.6 && r.bottom > -innerHeight * 0.6) {
-                    warm(largestFromSrcset(img));
-                }
+                if (r.top < innerHeight * 1.6 && r.bottom > -innerHeight * 0.6) warm(largestFromSrcset(img));
             });
         }
         sc.scrollTop = startY;
-        toast("Grid warm-up run finished");
+        toast("Warm-up complete");
     }
 
-    // --- DELETE LOGIC ---
     function triggerDelete() {
-        const trashButton = document.querySelector('button[aria-label*="Delete"], button[aria-label*="trash"]');
-        if (trashButton) {
-            trashButton.click();
-            let attempts = 0;
-            const findConfirmButton = setInterval(() => {
-                attempts++;
-                const confirmBtn = Array.from(document.querySelectorAll('button')).find(b =>
-                    b.textContent.includes("Move to trash") || b.innerText.includes("Move to trash")
-                );
-                if (confirmBtn) {
-                    confirmBtn.click();
-                    clearInterval(findConfirmButton);
-                } else if (attempts > 40) {
-                    clearInterval(findConfirmButton);
-                }
-            }, 50);
-        }
+        const btn = document.querySelector('button[aria-label*="Delete"], button[aria-label*="trash"]');
+        if (!btn) return;
+        btn.click();
+        let att = 0;
+        const itv = setInterval(() => {
+            const conf = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes("Move to trash"));
+            if (conf) { conf.click(); clearInterval(itv); }
+            else if (++att > 40) clearInterval(itv);
+        }, 50);
     }
 
-    // --- UI CONSTRUCTION (Floating Panel) ---
+    // --- UI CONSTRUCTION ---
     const container = document.createElement('div');
     container.id = 'gp-helper-ui';
     container.innerHTML = `
         <div class="gp-row">
-            <button id="btn-scroll" class="gp-btn">Scroll</button>
+            <button id="btn-scroll" class="gp-btn">Auto-Scroll</button>
             <button id="btn-toggle" class="gp-btn secondary">≫</button>
         </div>
         <div id="gp-expanded" class="hidden">
-            <div class="gp-row">
-                <span>Count:</span>
-                <input type="number" id="inp-count" class="gp-input" value="200">
+            <div class="gp-section-title">
+                Preloader 
+                <span class="gp-info" title="Pre-fetches high-resolution images of adjacent photos so they load instantly when navigating left/right.">ⓘ</span>
             </div>
-            <div class="gp-row">
-                <span>Delay (ms):</span>
-                <input type="number" id="inp-delay" class="gp-input" value="500">
+            <div class="gp-row"><span>Neighbors:</span><input type="number" id="cfg-neighbors" class="gp-input" value="${cfg.neighbors}"></div>
+            <div class="gp-row"><span>Parallel:</span><input type="number" id="cfg-parallel" class="gp-input" value="${cfg.parallel}"></div>
+            
+            <div class="gp-section-title">
+                Grid Warmer 
+                <span class="gp-info" title="Automatically scrolls down and pre-loads thumbnails in the gallery view to ensure smooth scrolling.">ⓘ</span>
             </div>
+            <div class="gp-row"><span>Enable:</span><input type="checkbox" id="cfg-warmer-on"></div>
+            <div class="gp-row"><span>Steps:</span><input type="number" id="cfg-warmer-steps" class="gp-input" value="${cfg.warmerSteps}"></div>
+            <div class="gp-row"><span>Delay (ms):</span><input type="number" id="cfg-warmer-delay" class="gp-input" value="${cfg.warmerDelay}"></div>
+
+            <div class="gp-section-title">
+                Auto-Scroll 
+                <span class="gp-info" title="Automatically advances through photos in the viewer at the set delay interval.">ⓘ</span>
+            </div>
+            <div class="gp-row"><span>Limit:</span><input type="number" id="cfg-auto-count" class="gp-input" value="${cfg.autoCount}"></div>
+            <div class="gp-row"><span>Delay (ms):</span><input type="number" id="cfg-auto-delay" class="gp-input" value="${cfg.autoDelay}"></div>
+
             <div id="gp-docs">
                 <strong>Hotkeys:</strong><br>
-                • <b>End:</b> Delete photo<br>
-                • <b>Alt+P:</b> Toggle Grid Cache<br>
-                • <b>Arrows:</b> Instant Nav (Preloaded)
+                • <b>End:</b> Instant Delete<br>
+                • <b>Arrows:</b> Smart Preload Nav
             </div>
         </div>
     `;
     document.body.appendChild(container);
 
-    const btnScroll = document.getElementById('btn-scroll');
-    const btnToggle = document.getElementById('btn-toggle');
-    const expandedArea = document.getElementById('gp-expanded');
-    const inpCount = document.getElementById('inp-count');
-    const inpDelay = document.getElementById('inp-delay');
-
-    btnToggle.addEventListener('click', () => {
-        const isHidden = expandedArea.classList.toggle('hidden');
-        btnToggle.textContent = isHidden ? "≫" : "≪";
-    });
-
-    // --- AUTO-SCROLL LOGIC ---
-    let autoScrollInterval = null;
-
-    const stopAutoScroll = () => {
-        clearInterval(autoScrollInterval);
-        autoScrollInterval = null;
-        btnScroll.textContent = "Scroll";
-        btnScroll.classList.remove('stop');
+    // --- UI EVENTS ---
+    const get = (id) => document.getElementById(id);
+    
+    get('btn-toggle').onclick = () => {
+        const h = get('gp-expanded').classList.toggle('hidden');
+        get('btn-toggle').textContent = h ? "≫" : "≪";
     };
 
-    const clickNextButton = () => {
-        const nextBtn = document.querySelector('div[aria-label="View next photo"]') || 
-                        document.querySelector('div[jsname="OCpkoe"]');
-        if (nextBtn) {
-            nextBtn.click();
-            return true;
-        }
-        return false;
+    // Sync UI to Config Object
+    const sync = () => {
+        cfg.neighbors = parseInt(get('cfg-neighbors').value);
+        cfg.parallel = parseInt(get('cfg-parallel').value);
+        cfg.warmerSteps = parseInt(get('cfg-warmer-steps').value);
+        cfg.warmerDelay = parseInt(get('cfg-warmer-delay').value);
+        cfg.autoCount = parseInt(get('cfg-auto-count').value);
+        cfg.autoDelay = parseInt(get('cfg-auto-delay').value);
+        
+        const wasEnabled = cfg.warmerEnabled;
+        cfg.warmerEnabled = get('cfg-warmer-on').checked;
+        if (!wasEnabled && cfg.warmerEnabled) gridWarmer();
     };
 
-    btnScroll.addEventListener('click', () => {
-        if (autoScrollInterval) {
-            stopAutoScroll();
+    container.addEventListener('input', sync);
+
+    // Auto-Scroll Logic
+    let scrollItv = null;
+    get('btn-scroll').onclick = () => {
+        if (scrollItv) {
+            clearInterval(scrollItv); scrollItv = null;
+            get('btn-scroll').textContent = "Auto-Scroll";
+            get('btn-scroll').classList.remove('stop');
             return;
         }
-        let count = parseInt(inpCount.value);
-        let current = 0;
-        btnScroll.textContent = "Stop";
-        btnScroll.classList.add('stop');
+        let cur = 0;
+        get('btn-scroll').textContent = "STOP";
+        get('btn-scroll').classList.add('stop');
+        scrollItv = setInterval(() => {
+            const n = document.querySelector('div[aria-label="View next photo"]') || document.querySelector('div[jsname="OCpkoe"]');
+            if (++cur >= cfg.autoCount || !n) get('btn-scroll').click();
+            else n.click();
+        }, cfg.autoDelay);
+    };
 
-        autoScrollInterval = setInterval(() => {
-            current++;
-            const success = clickNextButton();
-            if (current >= count || !success) stopAutoScroll();
-        }, parseInt(inpDelay.value));
-    });
-
-    // --- NAVIGATION & KEYBOARD HANDLERS ---
+    // --- HANDLERS ---
     window.addEventListener('keydown', (e) => {
-        // 1. Delete Photo
-        if (e.key === "End") {
-            e.preventDefault(); e.stopPropagation();
-            triggerDelete();
-        } 
-        // 2. Preload on Navigation
+        if (e.key === "End") { e.preventDefault(); triggerDelete(); } 
         else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-            setTimeout(preloadViewerAndNeighbors, 60);
-        } 
-        // 3. Toggle Grid Warmer
-        else if (e.altKey && (e.key.toLowerCase() === 'p')) {
-            enableGridWarmer = !enableGridWarmer;
-            toast(`Grid warmer ${enableGridWarmer ? 'ON' : 'OFF'}`);
-            if (enableGridWarmer && !/\/photo\//.test(location.pathname)) gridWarmer();
+            setTimeout(preloadViewerAndNeighbors, 100);
         }
     }, true);
 
-    // Watch for SPA navigation
     let lastPath = location.pathname;
     const observer = new MutationObserver(() => {
-        const now = location.pathname;
-        if (now === lastPath) return;
-        lastPath = now;
+        if (location.pathname === lastPath) return;
+        lastPath = location.pathname;
         setTimeout(() => {
-            if (/\/photo\//.test(now)) preloadViewerAndNeighbors();
-            else if (enableGridWarmer) gridWarmer();
-        }, 250);
+            if (/\/photo\//.test(lastPath)) preloadViewerAndNeighbors();
+            else if (cfg.warmerEnabled) gridWarmer();
+        }, 300);
     });
     observer.observe(document.documentElement, { subtree: true, childList: true });
-
-    // Initial load
-    setTimeout(() => {
-        if (/\/photo\//.test(location.pathname)) preloadViewerAndNeighbors();
-    }, 800);
 
 })();
