@@ -36,9 +36,11 @@
     const queue = [];
     const warmed = new Set();
 
-    // --- STYLING ---
+// --- STYLING (CSP-safe native method) ---
     const style = document.createElement('style');
-    style.innerHTML = `
+
+    // CSP: Using textContent avoids the HTML string parser (innerHTML) entirely
+    style.textContent = `
         #gp-helper-ui {
             position: fixed; bottom: 20px; right: 20px;
             background: #202124; color: white; padding: 12px;
@@ -173,7 +175,7 @@
         const sc = document.scrollingElement || document.documentElement;
         const startY = sc.scrollTop;
         const step = Math.max(200, window.innerHeight * 0.8);
-        
+
         log("Starting Grid Warm-up");
         toast("Starting Grid Warm-up...");
         for (let i = 0; i < cfg.warmerSteps && cfg.warmerEnabled; i++) {
@@ -198,14 +200,14 @@
         }
         btn.click();
         log("Clicked initial delete button");
-        
+
         let att = 0;
         const itv = setInterval(() => {
             const conf = Array.from(document.querySelectorAll(cfg.selectors.confirmTrashBtn)).find(b => b.textContent.includes(cfg.selectors.confirmTrashText));
-            if (conf) { 
-                conf.click(); 
+            if (conf) {
+                conf.click();
                 log("Confirmed move to trash");
-                clearInterval(itv); 
+                clearInterval(itv);
             }
             else if (++att > 40) {
                 log("Confirmation dialog not found. Timed out.");
@@ -214,58 +216,122 @@
         }, 50);
     }
 
-    // --- UI CONSTRUCTION ---
+// --- UI CONSTRUCTION (CSP: Zero-string structural DOM manipulation) ---
     const container = document.createElement('div');
     container.id = 'gp-helper-ui';
-    container.innerHTML = `
-        <div class="gp-row">
-            <button id="btn-scroll" class="gp-btn">Auto-Scroll</button>
-            <button id="btn-toggle" class="gp-btn secondary">≫</button>
-        </div>
-        <div id="gp-expanded" class="hidden">
-            <div class="gp-section-title">
-                Preloader 
-                <span class="gp-info" title="Pre-fetches high-resolution images of adjacent photos so they load instantly when navigating left/right.">ⓘ</span>
-            </div>
-            <div class="gp-row"><span>Neighbors:</span><input type="number" id="cfg-neighbors" class="gp-input" value="${cfg.neighbors}"></div>
-            <div class="gp-row"><span>Parallel:</span><input type="number" id="cfg-parallel" class="gp-input" value="${cfg.parallel}"></div>
-            
-            <div class="gp-section-title">
-                Grid Warmer 
-                <span class="gp-info" title="Automatically scrolls down and pre-loads thumbnails in the gallery view to ensure smooth scrolling.">ⓘ</span>
-            </div>
-            <div class="gp-row"><span>Enable:</span><input type="checkbox" id="cfg-warmer-on" ${cfg.warmerEnabled ? 'checked' : ''}></div>
-            <div class="gp-row"><span>Steps:</span><input type="number" id="cfg-warmer-steps" class="gp-input" value="${cfg.warmerSteps}"></div>
-            <div class="gp-row"><span>Delay (ms):</span><input type="number" id="cfg-warmer-delay" class="gp-input" value="${cfg.warmerDelay}"></div>
 
-            <div class="gp-section-title">
-                Auto-Scroll 
-                <span class="gp-info" title="Automatically advances through photos in the viewer at the set delay interval.">ⓘ</span>
-            </div>
-            <div class="gp-row"><span>Limit:</span><input type="number" id="cfg-auto-count" class="gp-input" value="${cfg.autoCount}"></div>
-            <div class="gp-row"><span>Delay (ms):</span><input type="number" id="cfg-auto-delay" class="gp-input" value="${cfg.autoDelay}"></div>
+    // Top action row
+    const rowTop = document.createElement('div');
+    rowTop.className = 'gp-row';
 
-            <div class="gp-section-title">
-                Advanced & Tracking
-                <span class="gp-info" title="Configure elements used for DOM tracking and toggle console logging.">ⓘ</span>
-            </div>
-            <div class="gp-row"><span>Enable Logging:</span><input type="checkbox" id="cfg-logging" ${cfg.loggingEnabled ? 'checked' : ''}></div>
-            <div class="gp-row"><span>Del Btn:</span><input type="text" id="cfg-sel-del" class="gp-input gp-input-long" value="${escapeHTML(cfg.selectors.deleteBtn)}"></div>
-            <div class="gp-row"><span>Next Btn:</span><input type="text" id="cfg-sel-next" class="gp-input gp-input-long" value="${escapeHTML(cfg.selectors.nextPhotoBtn)}"></div>
-            <div class="gp-row"><span>Trash Txt:</span><input type="text" id="cfg-sel-trash" class="gp-input gp-input-long" value="${escapeHTML(cfg.selectors.confirmTrashText)}"></div>
+    const btnScroll = document.createElement('button');
+    btnScroll.id = 'btn-scroll';
+    btnScroll.className = 'gp-btn';
+    btnScroll.textContent = 'Auto-Scroll';
 
-            <div id="gp-docs">
-                <strong>Hotkeys:</strong><br>
-                • <b>End:</b> Instant Delete<br>
-                • <b>Arrows:</b> Smart Preload Nav
-            </div>
-        </div>
-    `;
+    const btnToggle = document.createElement('button');
+    btnToggle.id = 'btn-toggle';
+    btnToggle.className = 'gp-btn secondary';
+    btnToggle.textContent = '≫';
+
+    rowTop.appendChild(btnScroll);
+    rowTop.appendChild(btnToggle);
+    container.appendChild(rowTop);
+
+    // Expanded Section panel
+    const expanded = document.createElement('div');
+    expanded.id = 'gp-expanded';
+    expanded.className = 'hidden';
+
+    // Helper to generate section headers safely
+    const createSectionTitle = (titleText, tooltipText) => {
+        const div = document.createElement('div');
+        div.className = 'gp-section-title';
+        div.textContent = titleText + ' ';
+
+        const span = document.createElement('span');
+        span.className = 'gp-info';
+        span.textContent = 'ⓘ';
+        span.title = tooltipText;
+
+        div.appendChild(span);
+        return div;
+    };
+
+    // Helper to generate rows with inputs safely
+    const createInputRow = (labelText, inputId, inputType, initialValue, isChecked = false, longInput = false) => {
+        const row = document.createElement('div');
+        row.className = 'gp-row';
+
+        const label = document.createElement('span');
+        label.textContent = labelText;
+        row.appendChild(label);
+
+        const input = document.createElement('input');
+        input.type = inputType;
+        input.id = inputId;
+        input.className = longInput ? 'gp-input gp-input-long' : 'gp-input';
+
+        if (inputType === 'checkbox') {
+            input.checked = isChecked;
+        } else {
+            input.value = initialValue;
+        }
+
+        row.appendChild(input);
+        return row;
+    };
+
+    // Append Preloader Configs
+    expanded.appendChild(createSectionTitle('Preloader', 'Pre-fetches high-resolution images of adjacent photos so they load instantly when navigating left/right.'));
+    expanded.appendChild(createInputRow('Neighbors:', 'cfg-neighbors', 'number', cfg.neighbors));
+    expanded.appendChild(createInputRow('Parallel:', 'cfg-parallel', 'number', cfg.parallel));
+
+    // Append Grid Warmer Configs
+    expanded.appendChild(createSectionTitle('Grid Warmer', 'Automatically scrolls down and pre-loads thumbnails in the gallery view to ensure smooth scrolling.'));
+    expanded.appendChild(createInputRow('Enable:', 'cfg-warmer-on', 'checkbox', null, cfg.warmerEnabled));
+    expanded.appendChild(createInputRow('Steps:', 'cfg-warmer-steps', 'number', cfg.warmerSteps));
+    expanded.appendChild(createInputRow('Delay (ms):', 'cfg-warmer-delay', 'number', cfg.warmerDelay));
+
+    // Append Auto-Scroll Configs
+    expanded.appendChild(createSectionTitle('Auto-Scroll', 'Automatically advances through photos in the viewer at the set delay interval.'));
+    expanded.appendChild(createInputRow('Limit:', 'cfg-auto-count', 'number', cfg.autoCount));
+    expanded.appendChild(createInputRow('Delay (ms):', 'cfg-auto-delay', 'number', cfg.autoDelay));
+
+    // Append Advanced Configs
+    expanded.appendChild(createSectionTitle('Advanced & Tracking', 'Configure elements used for DOM tracking and toggle console logging.'));
+    expanded.appendChild(createInputRow('Enable Logging:', 'cfg-logging', 'checkbox', null, cfg.loggingEnabled));
+    expanded.appendChild(createInputRow('Del Btn:', 'cfg-sel-del', 'text', cfg.selectors.deleteBtn, false, true));
+    expanded.appendChild(createInputRow('Next Btn:', 'cfg-sel-next', 'text', cfg.selectors.nextPhotoBtn, false, true));
+    expanded.appendChild(createInputRow('Trash Txt:', 'cfg-sel-trash', 'text', cfg.selectors.confirmTrashText, false, true));
+
+    // Documentation Panel
+    const docs = document.createElement('div');
+    docs.id = 'gp-docs';
+
+    const docsTitle = document.createElement('strong');
+    docsTitle.textContent = 'Hotkeys:';
+    docs.appendChild(docsTitle);
+    docs.appendChild(document.createElement('br'));
+
+    docs.appendChild(document.createTextNode('• '));
+    const b1 = document.createElement('b'); b1.textContent = 'End:'; docs.appendChild(b1);
+    docs.appendChild(document.createTextNode(' Instant Delete'));
+    docs.appendChild(document.createElement('br'));
+
+    docs.appendChild(document.createTextNode('• '));
+    const b2 = document.createElement('b'); b2.textContent = 'Arrows:'; docs.appendChild(b2);
+    docs.appendChild(document.createTextNode(' Smart Preload Nav'));
+
+    expanded.appendChild(docs);
+    container.appendChild(expanded);
+
+    // Mount to live DOM safely
     document.body.appendChild(container);
 
     // --- UI EVENTS ---
     const get = (id) => document.getElementById(id);
-    
+
     get('btn-toggle').onclick = () => {
         const h = get('gp-expanded').classList.toggle('hidden');
         get('btn-toggle').textContent = h ? "≫" : "≪";
@@ -280,12 +346,12 @@
         cfg.warmerDelay = parseInt(get('cfg-warmer-delay').value);
         cfg.autoCount = parseInt(get('cfg-auto-count').value);
         cfg.autoDelay = parseInt(get('cfg-auto-delay').value);
-        
+
         cfg.loggingEnabled = get('cfg-logging').checked;
         cfg.selectors.deleteBtn = get('cfg-sel-del').value;
         cfg.selectors.nextPhotoBtn = get('cfg-sel-next').value;
         cfg.selectors.confirmTrashText = get('cfg-sel-trash').value;
-        
+
         const wasEnabled = cfg.warmerEnabled;
         cfg.warmerEnabled = get('cfg-warmer-on').checked;
         if (!wasEnabled && cfg.warmerEnabled) gridWarmer();
@@ -321,10 +387,10 @@
 
     // --- HANDLERS ---
     window.addEventListener('keydown', (e) => {
-        if (e.key === "End") { 
-            e.preventDefault(); 
-            triggerDelete(); 
-        } 
+        if (e.key === "End") {
+            e.preventDefault();
+            triggerDelete();
+        }
         else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
             log("Navigated via arrow keys");
             setTimeout(preloadViewerAndNeighbors, 100);
